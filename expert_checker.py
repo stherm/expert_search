@@ -252,6 +252,8 @@ def main() -> None:
     drossel = Drossel(args.delay, args.max_blocks)
     i = fehlversuche = 0
     nochmal: set[str] = set()                              # Fehler am Ende einmal wiederholen
+    preise = [float(r["preis"]) for r in ergebnisse.values() if r.get("preis")]
+    bestpreis = min(preise, default=None)
     try:
         while i < len(offen):
             m = offen[i]
@@ -296,6 +298,9 @@ def main() -> None:
             if werte["preis"] and werte["bestand_markt"] not in ("", None):
                 info += f"  (Markt: {werte['bestand_markt']} Stk.)"
             log(f"[{i}/{len(offen)}] {m['name']} {m['ort']}: {info}")
+            if werte["preis"] and (bestpreis is None or float(werte["preis"]) < bestpreis):
+                bestpreis = float(werte["preis"])
+                log(f"  ★ Neuer Bestpreis: {bestpreis:.2f} € – {m['name']}, {m['plz']} {m['ort']}")
             if i % 10 == 0:
                 speichern()
             drossel.ok()
@@ -312,8 +317,14 @@ def main() -> None:
     for r in mit_preis[:15]:
         bestand = f"Markt {r['bestand_markt'] or 0} Stk." if r["bestand_markt"] != "" else ""
         print(f"  {float(r['preis']):>9.2f} €  {r['markt']} – {r['plz']} {r['ort']}  {bestand}")
-    if mit_preis and mit_preis[0]["link"]:
-        print(f"\nGünstigster Link: {mit_preis[0]['link']}")
+    if mit_preis:
+        b = mit_preis[0]
+        gleich = sum(r["preis"] == b["preis"] for r in mit_preis)
+        bestand = f", Markt {b['bestand_markt'] or 0} Stk." if b["bestand_markt"] != "" else ""
+        print(f"\nBilligster: {float(b['preis']):.2f} € – {b['markt']}, {b['plz']} {b['ort']}{bestand}"
+              + (f" (gleicher Preis in {gleich} Märkten)" if gleich > 1 else ""))
+        if b["link"]:
+            print(f"Link: {b['link']}")
 
 
 if __name__ == "__main__":
