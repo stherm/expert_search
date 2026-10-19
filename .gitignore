@@ -1,0 +1,19 @@
+# Ergebnisse und Logs der Läufe
+*.csv
+*.tmp
+*.log
+*.log.*
+
+# Märkte-Cache (wird bei jedem Lauf neu geladen)
+maerkte.json
+
+# Nix
+result
+result-*
+
+# Python
+__pycache__/
+
+# Altlasten vom alten Playwright-Skript
+.browser-profil/
+*.orig
