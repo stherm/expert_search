@@ -204,6 +204,7 @@ def main() -> None:
     ap.add_argument("--out", help="CSV-Datei (Std: expert_<artikelnummer>.csv)")
     ap.add_argument("--neu", action="store_true", help="Bisherigen Fortschritt verwerfen")
     args = ap.parse_args()
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows: cp1252 kennt kein ★/→
 
     def _stopp(*_):                      # auch "kill" speichert sauber den Fortschritt
         raise KeyboardInterrupt
@@ -227,7 +228,7 @@ def main() -> None:
               "store_id", "status", "link"]
     ergebnisse: dict[str, dict] = {}
     if out.exists() and not args.neu:
-        with out.open(encoding="utf-8") as f:
+        with out.open(encoding="utf-8-sig") as f:
             ergebnisse = {r["store_id"]: r for r in csv.DictReader(f) if r.get("store_id")}
         erledigt = sum(r["status"] in FERTIG for r in ergebnisse.values())
         if erledigt:
@@ -241,7 +242,7 @@ def main() -> None:
 
     def speichern() -> None:
         tmp = out.with_suffix(".tmp")
-        with tmp.open("w", newline="", encoding="utf-8") as f:
+        with tmp.open("w", newline="", encoding="utf-8-sig") as f:   # BOM → Excel zeigt Umlaute
             w = csv.DictWriter(f, fieldnames=felder, extrasaction="ignore")
             w.writeheader()
             for r in sorted(ergebnisse.values(),
