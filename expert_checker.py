@@ -31,20 +31,29 @@ Beispiele:
   python expert_checker.py 12220178771 --filter "Köln,Bonn,53"   # Name/Ort/PLZ
   python expert_checker.py 12220178771 --delay 6                 # noch vorsichtiger
   python expert_checker.py 12220178771 --neu                     # Fortschritt verwerfen
+  python expert_checker.py 12220178771 --alle 12h                # alle 12 Stunden suchen
+  python expert_checker.py --test-nachricht                      # E-Mail/Push testen
+
+Benachrichtigung per E-Mail oder Push (ntfy) und Standardwerte für die Suche
+kommen aus expert.ini im aktuellen Ordner (Vorlage: expert.beispiel.ini).
 """
 
 from __future__ import annotations
 
 import argparse
+import configparser
 import csv
 import json
 import random
 import re
 import signal
+import smtplib
+import ssl
 import sys
 import time
 import urllib.error
 import urllib.request
+from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -190,44 +199,136 @@ def auswerten(daten: dict | None) -> dict:
     }
 
 
+def euro(wert: str) -> str:
+    return f"{float(wert):.2f} €".replace(".", ",")
+
+
+def stueck(r: dict) -> float:
+    try:
+        return float(r["bestand_markt"])
+    except (TypeError, ValueError):
+        return 0
+
+
+def bestenliste(mit_preis: list[dict]) -> list[dict]:
+    """Die 3 günstigsten Märkte, bei Gleichstand bis zu 5."""
+    n = min(3, len(mit_preis))
+    while n < min(5, len(mit_preis)) and mit_preis[n]["preis"] == mit_preis[n - 1]["preis"]:
+        n += 1
+    return mit_preis[:n]
+
+
+def nachricht(webcode: str, url: str, mit_preis: list[dict],
+              anzahl: int) -> tuple[str, str, str, str]:
+    """Betreff, E-Mail-Text, Push-Text und Link zum günstigsten Markt."""
+    m = re.search(r"/\d{6,}-([^/]*)\.html", url)
+    name = m.group(1).replace("-", " ") if m else f"Artikel {webcode}"
+    beste = bestenliste(mit_preis)
+    stand = time.strftime("%d.%m.%Y %H:%M")
+    if not beste:
+        text = f"{name}: kein Markt mit Preis ({anzahl} abgefragt, Stand {stand})."
+        return f"expert: kein Preis für {name}", text, text, url
+    mail = [f"{name} (Artikel {webcode})", url,
+            f"{len(mit_preis)} von {anzahl} Märkten mit Preis, Stand {stand}", ""]
+    push = []
+    for platz, r in enumerate(beste, 1):
+        extras = []
+        if r["nach_cashback"]:
+            extras.append(f"nach Cashback {euro(r['nach_cashback'])}")
+        if r["bestand_markt"] not in ("", None):
+            extras.append(f"Markt {r['bestand_markt'] or 0} Stk.")
+        zeile = f"{platz}. {euro(r['preis'])}  {r['markt']}, {r['plz']} {r['ort']}"
+        if extras:
+            zeile += f" ({', '.join(extras)})"
+        push.append(zeile)
+        mail.append(zeile)
+        if r["aktion"]:
+            mail.append(f"   {r['aktion']}")
+        if r["link"]:
+            mail.append(f"   {r['link']}")
+    weitere = sum(r["preis"] == beste[-1]["preis"] for r in mit_preis[len(beste):])
+    if weitere:
+        maerkte = "Markt" if weitere == 1 else "Märkten"
+        hinweis = f"Gleicher Preis noch in {weitere} weiteren {maerkte}."
+        mail += ["", hinweis]
+        push.append(hinweis)
+    return (f"expert: {name} ab {euro(beste[0]['preis'])}", "\n".join(mail),
+            "\n".join(push), beste[0]["link"] or url)
+
+
+def mail_senden(m: configparser.SectionProxy, titel: str, text: str) -> None:
+    nachr = EmailMessage()
+    nachr["Subject"] = titel
+    nachr["From"] = m.get("von") or m["benutzer"]
+    nachr["To"] = m["an"]
+    nachr.set_content(text)
+    port = m.getint("port", fallback=587)
+    kontext = ssl.create_default_context()
+    if port == 465:
+        smtp = smtplib.SMTP_SSL(m["server"], port, timeout=30, context=kontext)
+    else:
+        smtp = smtplib.SMTP(m["server"], port, timeout=30)
+    with smtp:
+        if port != 465:
+            smtp.starttls(context=kontext)
+        smtp.login(m["benutzer"], m["passwort"])
+        smtp.send_message(nachr)
+
+
+def push_senden(p: configparser.SectionProxy, titel: str, text: str, link: str) -> None:
+    daten = {"topic": p["thema"], "title": titel, "message": text}
+    if link:
+        daten["click"] = link
+    req = urllib.request.Request((p.get("server") or "https://ntfy.sh").rstrip("/"),
+                                 data=json.dumps(daten).encode("utf-8"),
+                                 headers={"Content-Type": "application/json", "User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=30):
+        pass
+
+
+def benachrichtigen(cfg: configparser.ConfigParser, titel: str, mailtext: str,
+                    pushtext: str, link: str) -> int:
+    """Sendet an alle eingerichteten Kanäle, gibt deren Anzahl zurück."""
+    kanaele = 0
+    if cfg.has_section("mail") and cfg["mail"].get("an"):
+        kanaele += 1
+        try:
+            mail_senden(cfg["mail"], titel, mailtext)
+            log(f"E-Mail an {cfg['mail']['an']} gesendet.")
+        except KeyError as e:
+            log(f"E-Mail fehlgeschlagen: Eintrag {e} fehlt unter [mail].")
+        except (OSError, ValueError) as e:
+            log(f"E-Mail fehlgeschlagen: {type(e).__name__}: {e}")
+    if cfg.has_section("push") and cfg["push"].get("thema"):
+        kanaele += 1
+        try:
+            push_senden(cfg["push"], titel, pushtext, link)
+            log(f"Push an Thema {cfg['push']['thema']} gesendet.")
+        except KeyError as e:
+            log(f"Push fehlgeschlagen: Eintrag {e} fehlt unter [push].")
+        except (OSError, ValueError) as e:
+            log(f"Push fehlgeschlagen: {type(e).__name__}: {e}")
+    return kanaele
+
+
+def dauer(text: str) -> float:
+    """'12h', '30m', '1d' oder Stunden als Zahl → Sekunden."""
+    m = re.fullmatch(r"\s*(\d+(?:[.,]\d+)?)\s*([mhd]?)\s*", text.lower())
+    if not m or float(m.group(1).replace(",", ".")) <= 0:
+        raise argparse.ArgumentTypeError(f"ungültige Dauer: {text!r} (z.B. 12h, 30m, 1d)")
+    return float(m.group(1).replace(",", ".")) * {"m": 60, "d": 86400}.get(m.group(2), 3600)
+
+
 # ------------------------------------------------------------------ Main
-def main() -> None:
-    ap = argparse.ArgumentParser(description="expert-Märkte nach Produktpreis durchsuchen")
-    ap.add_argument("produkt", help="Artikelnummer (z.B. 12220178771) oder Produkt-URL")
-    ap.add_argument("--filter", help="Nur Märkte, deren Name, Ort oder PLZ einen dieser "
-                                     "Begriffe enthält (kommagetrennt, z.B. 'Köln,Bonn,53')")
-    ap.add_argument("--delay", type=float, default=3.0, help="Pause zw. Anfragen in s (Std: 3)")
-    ap.add_argument("--max-blocks", type=int, default=5,
-                    help="Abbruch nach so vielen Blockaden in Folge (Std: 5)")
-    ap.add_argument("--versuche", type=int, default=3,
-                    help="Versuche pro Markt bei Netzwerkfehlern (Std: 3)")
-    ap.add_argument("--out", help="CSV-Datei (Std: expert_<artikelnummer>.csv)")
-    ap.add_argument("--neu", action="store_true", help="Bisherigen Fortschritt verwerfen")
-    args = ap.parse_args()
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows: cp1252 kennt kein ★/→
-
-    def _stopp(*_):                      # auch "kill" speichert sauber den Fortschritt
-        raise KeyboardInterrupt
-    signal.signal(signal.SIGTERM, _stopp)
-    signal.signal(signal.SIGINT, _stopp)
-
-    webcode, url = produkt_aufloesen(args.produkt.strip())
-    log(f"Artikel {webcode}" + (f" – {url}" if url else ""))
-
-    maerkte = lade_maerkte(Path("maerkte.json"))
-    if args.filter:
-        begriffe = [b.strip().lower() for b in args.filter.split(",") if b.strip()]
-        maerkte = [m for m in maerkte
-                   if any(b in f"{m['name']} {m['ort']} {m['plz']}".lower() for b in begriffe)]
-    if not maerkte:
-        sys.exit("Keine Märkte passen zum Filter.")
-
+def durchlauf(args: argparse.Namespace, webcode: str, url: str, maerkte: list[dict],
+              neu: bool) -> tuple[str, list[dict]]:
+    """Ein Suchlauf. Status: fertig, blockiert, abgebrochen oder schon_fertig."""
     out = Path(args.out or f"expert_{webcode}.csv")
     felder = ["preis", "nach_cashback", "listenpreis", "aktion", "markt", "ort", "plz",
               "bestand_markt", "bestand_online", "online", "markt_verfuegbar",
               "store_id", "status", "link"]
     ergebnisse: dict[str, dict] = {}
-    if out.exists() and not args.neu:
+    if out.exists() and not neu:
         with out.open(encoding="utf-8-sig") as f:
             ergebnisse = {r["store_id"]: r for r in csv.DictReader(f) if r.get("store_id")}
         erledigt = sum(r["status"] in FERTIG for r in ergebnisse.values())
@@ -237,7 +338,7 @@ def main() -> None:
     offen = [m for m in maerkte if ergebnisse.get(m["id"], {}).get("status") not in FERTIG]
     if not offen:
         log(f"Alle Märkte bereits erledigt – siehe {out} (mit --neu frisch abfragen).")
-        return
+        return "schon_fertig", []
     log(f"{len(offen)} Märkte abzufragen (~{int(len(offen) * args.delay * 1.3 / 60) + 1} Min).")
 
     def speichern() -> None:
@@ -255,6 +356,7 @@ def main() -> None:
     nochmal: set[str] = set()                              # Fehler am Ende einmal wiederholen
     preise = [float(r["preis"]) for r in ergebnisse.values() if r.get("preis")]
     bestpreis = min(preise, default=None)
+    status_lauf = "fertig"
     try:
         while i < len(offen):
             m = offen[i]
@@ -275,6 +377,7 @@ def main() -> None:
                 if not drossel.blockiert(header.get("Retry-After")):
                     log("Zu viele Blockaden in Folge – stoppe. "
                         "Später einfach erneut starten, es geht hier weiter.")
+                    status_lauf = "blockiert"
                     break
                 continue                                       # gleichen Markt nochmal
 
@@ -307,11 +410,12 @@ def main() -> None:
             drossel.ok()
     except KeyboardInterrupt:
         log("Abgebrochen – Fortschritt wird gespeichert.")
+        status_lauf = "abgebrochen"
     finally:
         speichern()
 
     mit_preis = sorted((r for r in ergebnisse.values() if r.get("preis")),
-                       key=lambda r: float(r["preis"]))
+                       key=lambda r: (float(r["preis"]), -stueck(r)))
     fehler = sum(r["status"].startswith("fehler") for r in ergebnisse.values())
     print(f"\nErgebnis: {len(mit_preis)} von {len(maerkte)} Märkten mit Preis → {out}"
           + (f"  ({fehler} Fehler – erneut starten zum Wiederholen)" if fehler else ""))
@@ -326,6 +430,85 @@ def main() -> None:
               + (f" (gleicher Preis in {gleich} Märkten)" if gleich > 1 else ""))
         if b["link"]:
             print(f"Link: {b['link']}")
+    return status_lauf, mit_preis
+
+
+def main() -> None:
+    vorab = argparse.ArgumentParser(add_help=False)
+    vorab.add_argument("--einstellungen", default="expert.ini", metavar="DATEI",
+                       help="Einstellungsdatei für E-Mail/Push und Standardwerte (Std: expert.ini)")
+    pfad = Path(vorab.parse_known_args()[0].einstellungen)
+    cfg = configparser.ConfigParser(interpolation=None)
+    if pfad.exists():
+        cfg.read(pfad, encoding="utf-8-sig")
+    suche = cfg["suche"] if cfg.has_section("suche") else {}
+
+    ap = argparse.ArgumentParser(description="expert-Märkte nach Produktpreis durchsuchen",
+                                 parents=[vorab])
+    ap.add_argument("produkt", nargs="?", default=suche.get("produkt") or None,
+                    help="Artikelnummer (z.B. 12220178771) oder Produkt-URL "
+                         "(Std: produkt aus [suche] in expert.ini)")
+    ap.add_argument("--filter", default=suche.get("filter") or None,
+                    help="Nur Märkte, deren Name, Ort oder PLZ einen dieser "
+                         "Begriffe enthält (kommagetrennt, z.B. 'Köln,Bonn,53')")
+    ap.add_argument("--alle", type=dauer, default=suche.get("alle") or None, metavar="DAUER",
+                    help="Suche regelmäßig wiederholen, z.B. 12h, 30m oder 1d")
+    ap.add_argument("--delay", type=float, default=3.0, help="Pause zw. Anfragen in s (Std: 3)")
+    ap.add_argument("--max-blocks", type=int, default=5,
+                    help="Abbruch nach so vielen Blockaden in Folge (Std: 5)")
+    ap.add_argument("--versuche", type=int, default=3,
+                    help="Versuche pro Markt bei Netzwerkfehlern (Std: 3)")
+    ap.add_argument("--out", help="CSV-Datei (Std: expert_<artikelnummer>.csv)")
+    ap.add_argument("--neu", action="store_true", help="Bisherigen Fortschritt verwerfen")
+    ap.add_argument("--test-nachricht", action="store_true",
+                    help="Nur eine Test-E-Mail/-Push senden und beenden")
+    args = ap.parse_args()
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows: cp1252 kennt kein ★/→
+
+    if args.test_nachricht:
+        text = "Die Benachrichtigung vom expert-Checker funktioniert."
+        if not benachrichtigen(cfg, "expert: Testnachricht", text, text, ""):
+            sys.exit(f"Keine Benachrichtigung eingerichtet: [mail] oder [push] in {pfad} fehlt.")
+        return
+    if not args.produkt:
+        ap.error(f"Artikelnummer oder URL angeben oder unter [suche] in {pfad} eintragen.")
+
+    def _stopp(*_):                      # auch "kill" speichert sauber den Fortschritt
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _stopp)
+    signal.signal(signal.SIGINT, _stopp)
+
+    webcode, url = produkt_aufloesen(args.produkt.strip())
+    log(f"Artikel {webcode}" + (f" – {url}" if url else ""))
+
+    neu = args.neu
+    try:
+        while True:
+            beginn = time.time()
+            maerkte = lade_maerkte(Path("maerkte.json"))
+            if args.filter:
+                begriffe = [b.strip().lower() for b in args.filter.split(",") if b.strip()]
+                maerkte = [m for m in maerkte
+                           if any(b in f"{m['name']} {m['ort']} {m['plz']}".lower()
+                                  for b in begriffe)]
+            if not maerkte:
+                sys.exit("Keine Märkte passen zum Filter.")
+
+            status, mit_preis = durchlauf(args, webcode, url, maerkte, neu)
+            if status == "schon_fertig" and args.alle:
+                neu = True
+                continue
+            if status == "fertig":
+                benachrichtigen(cfg, *nachricht(webcode, url, mit_preis, len(maerkte)))
+            if status == "abgebrochen" or not args.alle:
+                break
+            neu = status == "fertig"
+            naechste = beginn + args.alle
+            log(f"Nächste Suche {time.strftime('%d.%m. %H:%M', time.localtime(naechste))}"
+                " - beenden mit Strg+C.")
+            time.sleep(max(0.0, naechste - time.time()))
+    except KeyboardInterrupt:
+        log("Beendet.")
 
 
 if __name__ == "__main__":

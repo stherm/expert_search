@@ -53,3 +53,63 @@ nix run github:stherm/expert_search -- 12220178771   # ohne Klonen
 Das Ergebnis landet in `expert_<artikelnummer>.csv`, sortiert nach Preis. Am Ende
 steht der günstigste Markt samt Link in der Ausgabe. Ein abgebrochener Lauf macht
 beim nächsten Start dort weiter. Alle Optionen: `--help`.
+
+## Regelmäßig suchen und benachrichtigen lassen
+
+Damit nicht jedes Mal alles eingetippt werden muss, liest das Skript die Datei
+`expert.ini` im selben Ordner. Am einfachsten `expert.beispiel.ini` kopieren, in
+`expert.ini` umbenennen und mit einem Texteditor anpassen:
+
+```ini
+[suche]
+produkt = 12220178771
+filter =
+alle = 12h
+
+[mail]
+an = ich@example.de
+server = mail.gmx.net
+port = 587
+benutzer = ich@gmx.de
+passwort = geheim
+
+[push]
+thema = expert-preise-bitte-aendern
+```
+
+Danach reicht `py expert_checker.py` (Windows) bzw. `python3 expert_checker.py`
+(macOS). Unter Windows genügt auch ein Doppelklick auf `expert_checker.py`.
+
+- **`[suche]`**: `produkt` und `filter` wie oben beschrieben. `alle` wiederholt
+  die Suche regelmäßig, z.B. `12h`, `30m` oder `1d`. Leer lassen für eine
+  einmalige Suche. Ein Lauf über alle Märkte dauert etwa 20 Minuten. Das Fenster
+  muss offen und der Rechner an bleiben, beenden mit Strg+C.
+- **`[mail]`**: Nach jeder vollständigen Suche kommt eine E-Mail mit den drei
+  günstigsten Märkten samt Preis, Bestand und Link. Haben mehrere Märkte den
+  gleichen Preis, werden es bis zu fünf. Mehrere Empfänger in `an` mit Komma
+  trennen. Wer nur Push möchte, lässt den Abschnitt weg.
+- **`[push]`**: Push-Nachricht aufs Handy über [ntfy](https://ntfy.sh). Die
+  kostenlose ntfy-App (Android/iOS) installieren und dort das gleiche `thema`
+  abonnieren. Das Thema ist wie ein Passwort: Jeder, der es kennt, kann
+  mitlesen, also einen eigenen, schwer erratbaren Namen wählen.
+
+Bei den meisten Anbietern braucht es für `passwort` ein eigenes App-Passwort
+statt des normalen Passworts:
+
+| Anbieter | `server`             | `port` | Hinweis                                              |
+|----------|----------------------|--------|------------------------------------------------------|
+| GMX      | `mail.gmx.net`       | 587    | In den Einstellungen „POP3/IMAP Abruf“ erlauben      |
+| WEB.DE   | `smtp.web.de`        | 587    | In den Einstellungen „POP3/IMAP Abruf“ erlauben      |
+| Gmail    | `smtp.gmail.com`     | 587    | App-Passwort anlegen (benötigt Bestätigung in zwei Schritten) |
+| Yahoo    | `smtp.mail.yahoo.com`| 465    | App-Passwort anlegen                                 |
+
+Ob alles passt, zeigt ein Test ohne Suchlauf:
+
+```sh
+py expert_checker.py --test-nachricht        # Windows
+python3 expert_checker.py --test-nachricht   # macOS
+```
+
+Alle Werte lassen sich auch einmalig auf der Kommandozeile setzen, z.B.
+`--alle 6h`. Für mehrere Produkte je eine eigene Datei anlegen und mit
+`--einstellungen tv.ini` auswählen.
