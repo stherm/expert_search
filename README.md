@@ -20,6 +20,10 @@ oder mit [Homebrew](https://brew.sh):
 brew install python
 ```
 
+Nach der Installation von python.org einmal „Install Certificates.command“ im
+Ordner „Programme/Python 3.x“ doppelklicken, sonst scheitern die Abfragen mit
+`CERTIFICATE_VERIFY_FAILED`.
+
 Danach dieses Repository herunterladen, entweder mit
 `git clone https://github.com/stherm/expert_search.git` oder auf GitHub über
 „Code“ → „Download ZIP“ (dann entpacken).
@@ -52,13 +56,16 @@ nix run github:stherm/expert_search -- 12220178771   # ohne Klonen
 
 Das Ergebnis landet in `expert_<artikelnummer>.csv`, sortiert nach Preis. Am Ende
 steht der günstigste Markt samt Link in der Ausgabe. Ein abgebrochener Lauf macht
-beim nächsten Start dort weiter. Alle Optionen: `--help`.
+beim nächsten Start dort weiter, ein vollständiger startet eine neue Suche. Alle
+Optionen: `--help`.
 
 ## Regelmäßig suchen und benachrichtigen lassen
 
 Damit nicht jedes Mal alles eingetippt werden muss, liest das Skript die Datei
-`expert.ini` im selben Ordner. Am einfachsten `expert.beispiel.ini` kopieren, in
-`expert.ini` umbenennen und mit einem Texteditor anpassen:
+`expert.ini` im Ordner `expert_search`. Am einfachsten `expert.beispiel.ini`
+kopieren, in `expert.ini` umbenennen und mit einem Texteditor anpassen. Zeigt der
+Windows-Explorer keine Dateiendungen an, heißt die Kopie dort nur `expert`, sonst
+entsteht `expert.ini.ini`.
 
 ```ini
 [suche]
@@ -78,12 +85,14 @@ thema = expert-preise-bitte-aendern
 ```
 
 Danach reicht `py expert_checker.py` (Windows) bzw. `python3 expert_checker.py`
-(macOS). Unter Windows genügt auch ein Doppelklick auf `expert_checker.py`.
+(macOS). Unter Windows genügt auch ein Doppelklick auf `expert_checker.py`, das
+Fenster bleibt dann am Ende offen, bis Enter gedrückt wird.
 
 - **`[suche]`**: `produkt` und `filter` wie oben beschrieben. `alle` wiederholt
   die Suche regelmäßig, z.B. `12h`, `30m` oder `1d`. Leer lassen für eine
-  einmalige Suche. Ein Lauf über alle Märkte dauert etwa 20 Minuten. Das Fenster
-  muss offen und der Rechner an bleiben, beenden mit Strg+C.
+  einmalige Suche. Ein Lauf über alle Märkte dauert etwa 20 Minuten, zwischen
+  zwei Läufen liegen mindestens 5 Minuten Pause. Das Fenster muss offen und der
+  Rechner an bleiben, beenden mit Strg+C.
 - **`[mail]`**: Eine E-Mail mit den drei günstigsten Märkten samt Preis,
   Bestand und Link. Haben mehrere Märkte den gleichen Preis, werden es bis zu
   fünf. Mehrere Empfänger in `an` mit Komma trennen. Wer nur Push möchte, lässt
@@ -91,22 +100,24 @@ Danach reicht `py expert_checker.py` (Windows) bzw. `python3 expert_checker.py`
 - **`[push]`**: Push-Nachricht aufs Handy über [ntfy](https://ntfy.sh). Die
   kostenlose ntfy-App (Android/iOS) installieren und dort das gleiche `thema`
   abonnieren. Das Thema ist wie ein Passwort: Jeder, der es kennt, kann
-  mitlesen, also einen eigenen, schwer erratbaren Namen wählen.
+  mitlesen, also einen eigenen, schwer erratbaren Namen wählen. Erlaubt sind
+  nur Buchstaben ohne Umlaute, Ziffern, `-` und `_`, höchstens 64 Zeichen.
 
 Benachrichtigt wird nach der ersten Suche und danach nur, wenn sich die Liste
 ändert, also ein Preis darin oder ein Markt dazukommt oder wegfällt. Geänderte
-Stückzahlen allein lösen nichts aus. Im Betreff steht dann auch der vorherige
-Bestpreis.
+Stückzahlen allein lösen nichts aus, und fällt ein Markt bei einer Suche kurz
+aus, gilt sein letzter Preis weiter. Hat sich der Bestpreis geändert, steht der
+vorherige im Betreff.
 
 Bei den meisten Anbietern braucht es für `passwort` ein eigenes App-Passwort
 statt des normalen Passworts:
 
-| Anbieter | `server`             | `port` | Hinweis                                              |
-|----------|----------------------|--------|------------------------------------------------------|
-| GMX      | `mail.gmx.net`       | 587    | In den Einstellungen „POP3/IMAP Abruf“ erlauben      |
-| WEB.DE   | `smtp.web.de`        | 587    | In den Einstellungen „POP3/IMAP Abruf“ erlauben      |
-| Gmail    | `smtp.gmail.com`     | 587    | App-Passwort anlegen (benötigt Bestätigung in zwei Schritten) |
-| Yahoo    | `smtp.mail.yahoo.com`| 465    | App-Passwort anlegen                                 |
+| Anbieter | `server`              | `port` | Hinweis                                                              |
+|----------|-----------------------|--------|----------------------------------------------------------------------|
+| GMX      | `mail.gmx.net`        | 587    | „POP3/IMAP Abruf“ erlauben, bei Zwei-Faktor-Anmeldung App-Passwort   |
+| WEB.DE   | `smtp.web.de`         | 587    | „POP3/IMAP Abruf“ erlauben, bei Zwei-Faktor-Anmeldung App-Passwort   |
+| Gmail    | `smtp.gmail.com`      | 587    | App-Passwort (braucht Bestätigung in zwei Schritten), ohne Leerzeichen |
+| Yahoo    | `smtp.mail.yahoo.com` | 465    | App-Passwort                                                         |
 
 Ob alles passt, zeigt ein Test ohne Suchlauf:
 

@@ -1,4 +1,5 @@
-expert.ini
+*.ini
+!expert.beispiel.ini
 
 # Ergebnisse und Logs der Läufe
 *.csv

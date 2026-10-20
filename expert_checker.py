@@ -41,8 +41,11 @@ kommen aus expert.ini im aktuellen Ordner (Vorlage: expert.beispiel.ini).
 from __future__ import annotations
 
 import argparse
+import base64
 import configparser
 import csv
+import ctypes
+import http.client
 import json
 import random
 import re
@@ -142,7 +145,7 @@ def produkt_aufloesen(eingabe: str) -> tuple[str, str]:
             with urllib.request.urlopen(req, timeout=30) as r:
                 if f"/{webcode}-" in r.url:
                     url = BASE + urlparse(r.url).path
-        except (urllib.error.URLError, TimeoutError):
+        except (OSError, http.client.HTTPException):
             pass
     return webcode, url
 
@@ -154,12 +157,14 @@ def lade_maerkte(cache: Path) -> list[dict]:
         if status != 200:
             raise ValueError(f"HTTP {status}")
         maerkte = [e["store"] for e in json.loads(body)]
+        if not maerkte:
+            raise ValueError("leere Märkteliste")
         try:
             cache.write_text(json.dumps(maerkte, ensure_ascii=False, indent=1),
                              encoding="utf-8")
         except OSError:
             pass
-    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError) as e:
         if not cache.exists():
             sys.exit(f"Märkteliste nicht abrufbar ({e}) und kein Cache vorhanden.")
         log(f"Märkteliste nicht abrufbar ({e}) – nutze Cache {cache.name}.")
@@ -218,12 +223,12 @@ def bestenliste(mit_preis: list[dict]) -> list[dict]:
     return mit_preis[:n]
 
 
-def kennung(mit_preis: list[dict]) -> frozenset:
-    """Alle Märkte bis zum Preis des letzten Listenplatzes, unabhängig vom Bestand."""
+def kennung(mit_preis: list[dict]) -> tuple:
+    """Preise der Liste und Märkte unter dem letzten Listenpreis, unabhängig vom Bestand."""
     beste = bestenliste(mit_preis)
-    grenze = float(beste[-1]["preis"]) if beste else 0
-    return frozenset((r["store_id"], r["preis"]) for r in mit_preis
-                     if float(r["preis"]) <= grenze)
+    grenze = beste[-1]["preis"] if beste else ""
+    return (tuple((r["preis"], r["nach_cashback"]) for r in beste),
+            frozenset(r["store_id"] for r in beste if r["preis"] != grenze))
 
 
 def nachricht(webcode: str, url: str, mit_preis: list[dict], anzahl: int,
@@ -236,8 +241,8 @@ def nachricht(webcode: str, url: str, mit_preis: list[dict], anzahl: int,
     if not beste:
         text = f"{name}: kein Markt mit Preis ({anzahl} abgefragt, Stand {stand})."
         return f"expert: kein Preis für {name}", text, text, url
-    mail = [f"{name} (Artikel {webcode})", url,
-            f"{len(mit_preis)} von {anzahl} Märkten mit Preis, Stand {stand}", ""]
+    mail = [f"{name} (Artikel {webcode})" if m else name] + ([url] if url else [])
+    mail += [f"{len(mit_preis)} von {anzahl} Märkten mit Preis, Stand {stand}", ""]
     push = []
     for platz, r in enumerate(beste, 1):
         extras = []
@@ -271,7 +276,7 @@ def mail_senden(m: configparser.SectionProxy, titel: str, text: str) -> None:
     nachr = EmailMessage()
     nachr["Subject"] = titel
     nachr["From"] = m.get("von") or m["benutzer"]
-    nachr["To"] = m["an"]
+    nachr["To"] = m["an"].replace(";", ",")
     nachr.set_content(text)
     port = m.getint("port", fallback=587)
     kontext = ssl.create_default_context()
@@ -282,7 +287,15 @@ def mail_senden(m: configparser.SectionProxy, titel: str, text: str) -> None:
     with smtp:
         if port != 465:
             smtp.starttls(context=kontext)
-        smtp.login(m["benutzer"], m["passwort"])
+        benutzer, passwort = m["benutzer"], m["passwort"]
+        if (benutzer + passwort).isascii():
+            smtp.login(benutzer, passwort)
+        else:
+            smtp.ehlo_or_helo_if_needed()
+            daten = base64.b64encode(f"\0{benutzer}\0{passwort}".encode("utf-8")).decode()
+            code, antwort = smtp.docmd("AUTH", "PLAIN " + daten)
+            if code != 235:
+                raise smtplib.SMTPAuthenticationError(code, antwort)
         smtp.send_message(nachr)
 
 
@@ -309,7 +322,7 @@ def benachrichtigen(cfg: configparser.ConfigParser, titel: str, mailtext: str,
             gesendet += 1
         except KeyError as e:
             log(f"E-Mail fehlgeschlagen: Eintrag {e} fehlt unter [mail].")
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             log(f"E-Mail fehlgeschlagen: {type(e).__name__}: {e}")
     if cfg.has_section("push") and cfg["push"].get("thema"):
         kanaele += 1
@@ -319,7 +332,7 @@ def benachrichtigen(cfg: configparser.ConfigParser, titel: str, mailtext: str,
             gesendet += 1
         except KeyError as e:
             log(f"Push fehlgeschlagen: Eintrag {e} fehlt unter [push].")
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             log(f"Push fehlgeschlagen: {type(e).__name__}: {e}")
     return kanaele, gesendet
 
@@ -341,17 +354,21 @@ def durchlauf(args: argparse.Namespace, webcode: str, url: str, maerkte: list[di
               "bestand_markt", "bestand_online", "online", "markt_verfuegbar",
               "store_id", "status", "link"]
     ergebnisse: dict[str, dict] = {}
-    if out.exists() and not neu:
+    alt: dict[str, dict] = {}
+    if out.exists():
+        ids = {m["id"] for m in maerkte}
         with out.open(encoding="utf-8-sig") as f:
-            ergebnisse = {r["store_id"]: r for r in csv.DictReader(f) if r.get("store_id")}
-        erledigt = sum(r["status"] in FERTIG for r in ergebnisse.values())
-        if erledigt:
-            log(f"Setze fort: {erledigt} Märkte bereits erledigt.")
+            alt = {r["store_id"]: r for r in csv.DictReader(f) if r.get("store_id") in ids}
+    if alt and not neu:
+        ergebnisse = dict(alt)
 
     offen = [m for m in maerkte if ergebnisse.get(m["id"], {}).get("status") not in FERTIG]
     if not offen:
-        log(f"Alle Märkte bereits erledigt – siehe {out} (mit --neu frisch abfragen).")
+        log("Letzte Suche war vollständig - starte eine neue.")
         return "schon_fertig", []
+    erledigt = sum(r["status"] in FERTIG for r in ergebnisse.values())
+    if erledigt:
+        log(f"Setze fort: {erledigt} Märkte bereits erledigt.")
     log(f"{len(offen)} Märkte abzufragen (~{int(len(offen) * args.delay * 1.3 / 60) + 1} Min).")
 
     def speichern() -> None:
@@ -376,7 +393,7 @@ def durchlauf(args: argparse.Namespace, webcode: str, url: str, maerkte: list[di
             try:
                 status, header, body, daten = preis_abfragen(webcode, m["id"])
                 grund = f"HTTP {status}"
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            except (OSError, http.client.HTTPException) as e:
                 status, header, body, daten = 0, {}, "", None
                 grund = str(e)
             # Netzwerkfehler / 500er sind meist vorübergehend → kurz warten, nochmal
@@ -404,6 +421,8 @@ def durchlauf(args: argparse.Namespace, webcode: str, url: str, maerkte: list[di
                 if m["id"] not in nochmal:
                     nochmal.add(m["id"])
                     offen.append(m)                            # am Ende nochmal versuchen
+                elif alt.get(m["id"], {}).get("status") == "ok":
+                    werte = {k: alt[m["id"]][k] for k in werte}
             ergebnisse[m["id"]] = {
                 **werte, "markt": m["name"], "ort": m["ort"], "plz": m["plz"],
                 "store_id": m["id"], "status": zustand,
@@ -452,8 +471,11 @@ def main() -> None:
                        help="Einstellungsdatei für E-Mail/Push und Standardwerte (Std: expert.ini)")
     pfad = Path(vorab.parse_known_args()[0].einstellungen)
     cfg = configparser.ConfigParser(interpolation=None)
-    if pfad.exists():
+    try:
         cfg.read(pfad, encoding="utf-8-sig")
+    except (configparser.Error, UnicodeDecodeError) as e:
+        sys.exit(f"{pfad} lässt sich nicht lesen ({e}).\n"
+                 "Als UTF-8 speichern und den Aufbau mit expert.beispiel.ini vergleichen.")
     suche = cfg["suche"] if cfg.has_section("suche") else {}
 
     ap = argparse.ArgumentParser(description="expert-Märkte nach Produktpreis durchsuchen",
@@ -480,8 +502,11 @@ def main() -> None:
 
     if args.test_nachricht:
         text = "Die Benachrichtigung vom expert-Checker funktioniert."
-        if not benachrichtigen(cfg, "expert: Testnachricht", text, text, "")[0]:
+        kanaele, gesendet = benachrichtigen(cfg, "expert: Testnachricht", text, text, "")
+        if not kanaele:
             sys.exit(f"Keine Benachrichtigung eingerichtet: [mail] oder [push] in {pfad} fehlt.")
+        if gesendet < kanaele:
+            sys.exit(1)
         return
     if not args.produkt:
         ap.error(f"Artikelnummer oder URL angeben oder unter [suche] in {pfad} eintragen.")
@@ -495,7 +520,7 @@ def main() -> None:
     log(f"Artikel {webcode}" + (f" – {url}" if url else ""))
 
     neu = args.neu
-    gemeldet: frozenset | None = None
+    gemeldet: tuple | None = None
     vorher: str | None = None
     try:
         while True:
@@ -510,7 +535,7 @@ def main() -> None:
                 sys.exit("Keine Märkte passen zum Filter.")
 
             status, mit_preis = durchlauf(args, webcode, url, maerkte, neu)
-            if status == "schon_fertig" and args.alle:
+            if status == "schon_fertig":
                 neu = True
                 continue
             if status == "fertig" and kennung(mit_preis) == gemeldet:
@@ -523,13 +548,28 @@ def main() -> None:
             if status == "abgebrochen" or not args.alle:
                 break
             neu = status == "fertig"
-            naechste = beginn + args.alle
+            naechste = max(beginn + args.alle, time.time() + 300)
             log(f"Nächste Suche {time.strftime('%d.%m. %H:%M', time.localtime(naechste))}"
                 " - beenden mit Strg+C.")
-            time.sleep(max(0.0, naechste - time.time()))
+            while time.time() < naechste:
+                time.sleep(max(0.0, min(60.0, naechste - time.time())))
     except KeyboardInterrupt:
         log("Beendet.")
 
 
+def doppelklick() -> bool:
+    """Unter Windows per Doppelklick gestartet, also ohne eigene Konsole."""
+    if sys.platform != "win32":
+        return False
+    return ctypes.windll.kernel32.GetConsoleProcessList((ctypes.c_uint * 4)(), 4) <= 2
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        if doppelklick():
+            try:
+                input("\nFertig - Enter schließt das Fenster.")
+            except (EOFError, KeyboardInterrupt):
+                pass
