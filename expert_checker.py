@@ -218,8 +218,16 @@ def bestenliste(mit_preis: list[dict]) -> list[dict]:
     return mit_preis[:n]
 
 
-def nachricht(webcode: str, url: str, mit_preis: list[dict],
-              anzahl: int) -> tuple[str, str, str, str]:
+def kennung(mit_preis: list[dict]) -> frozenset:
+    """Alle Märkte bis zum Preis des letzten Listenplatzes, unabhängig vom Bestand."""
+    beste = bestenliste(mit_preis)
+    grenze = float(beste[-1]["preis"]) if beste else 0
+    return frozenset((r["store_id"], r["preis"]) for r in mit_preis
+                     if float(r["preis"]) <= grenze)
+
+
+def nachricht(webcode: str, url: str, mit_preis: list[dict], anzahl: int,
+              vorher: str | None = None) -> tuple[str, str, str, str]:
     """Betreff, E-Mail-Text, Push-Text und Link zum günstigsten Markt."""
     m = re.search(r"/\d{6,}-([^/]*)\.html", url)
     name = m.group(1).replace("-", " ") if m else f"Artikel {webcode}"
@@ -252,7 +260,10 @@ def nachricht(webcode: str, url: str, mit_preis: list[dict],
         hinweis = f"Gleicher Preis noch in {weitere} weiteren {maerkte}."
         mail += ["", hinweis]
         push.append(hinweis)
-    return (f"expert: {name} ab {euro(beste[0]['preis'])}", "\n".join(mail),
+    titel = f"expert: {name} ab {euro(beste[0]['preis'])}"
+    if vorher and vorher != beste[0]["preis"]:
+        titel += f" (vorher {euro(vorher)})"
+    return (titel, "\n".join(mail),
             "\n".join(push), beste[0]["link"] or url)
 
 
@@ -287,14 +298,15 @@ def push_senden(p: configparser.SectionProxy, titel: str, text: str, link: str) 
 
 
 def benachrichtigen(cfg: configparser.ConfigParser, titel: str, mailtext: str,
-                    pushtext: str, link: str) -> int:
-    """Sendet an alle eingerichteten Kanäle, gibt deren Anzahl zurück."""
-    kanaele = 0
+                    pushtext: str, link: str) -> tuple[int, int]:
+    """Sendet an alle eingerichteten Kanäle. Liefert (eingerichtet, gesendet)."""
+    kanaele = gesendet = 0
     if cfg.has_section("mail") and cfg["mail"].get("an"):
         kanaele += 1
         try:
             mail_senden(cfg["mail"], titel, mailtext)
             log(f"E-Mail an {cfg['mail']['an']} gesendet.")
+            gesendet += 1
         except KeyError as e:
             log(f"E-Mail fehlgeschlagen: Eintrag {e} fehlt unter [mail].")
         except (OSError, ValueError) as e:
@@ -304,11 +316,12 @@ def benachrichtigen(cfg: configparser.ConfigParser, titel: str, mailtext: str,
         try:
             push_senden(cfg["push"], titel, pushtext, link)
             log(f"Push an Thema {cfg['push']['thema']} gesendet.")
+            gesendet += 1
         except KeyError as e:
             log(f"Push fehlgeschlagen: Eintrag {e} fehlt unter [push].")
         except (OSError, ValueError) as e:
             log(f"Push fehlgeschlagen: {type(e).__name__}: {e}")
-    return kanaele
+    return kanaele, gesendet
 
 
 def dauer(text: str) -> float:
@@ -467,7 +480,7 @@ def main() -> None:
 
     if args.test_nachricht:
         text = "Die Benachrichtigung vom expert-Checker funktioniert."
-        if not benachrichtigen(cfg, "expert: Testnachricht", text, text, ""):
+        if not benachrichtigen(cfg, "expert: Testnachricht", text, text, "")[0]:
             sys.exit(f"Keine Benachrichtigung eingerichtet: [mail] oder [push] in {pfad} fehlt.")
         return
     if not args.produkt:
@@ -482,6 +495,8 @@ def main() -> None:
     log(f"Artikel {webcode}" + (f" – {url}" if url else ""))
 
     neu = args.neu
+    gemeldet: frozenset | None = None
+    vorher: str | None = None
     try:
         while True:
             beginn = time.time()
@@ -498,8 +513,13 @@ def main() -> None:
             if status == "schon_fertig" and args.alle:
                 neu = True
                 continue
-            if status == "fertig":
-                benachrichtigen(cfg, *nachricht(webcode, url, mit_preis, len(maerkte)))
+            if status == "fertig" and kennung(mit_preis) == gemeldet:
+                log("Keine Änderung seit der letzten Benachrichtigung.")
+            elif status == "fertig":
+                text = nachricht(webcode, url, mit_preis, len(maerkte), vorher)
+                if benachrichtigen(cfg, *text)[1]:
+                    gemeldet = kennung(mit_preis)
+                    vorher = mit_preis[0]["preis"] if mit_preis else None
             if status == "abgebrochen" or not args.alle:
                 break
             neu = status == "fertig"

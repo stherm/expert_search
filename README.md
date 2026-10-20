@@ -84,14 +84,19 @@ Danach reicht `py expert_checker.py` (Windows) bzw. `python3 expert_checker.py`
   die Suche regelmäßig, z.B. `12h`, `30m` oder `1d`. Leer lassen für eine
   einmalige Suche. Ein Lauf über alle Märkte dauert etwa 20 Minuten. Das Fenster
   muss offen und der Rechner an bleiben, beenden mit Strg+C.
-- **`[mail]`**: Nach jeder vollständigen Suche kommt eine E-Mail mit den drei
-  günstigsten Märkten samt Preis, Bestand und Link. Haben mehrere Märkte den
-  gleichen Preis, werden es bis zu fünf. Mehrere Empfänger in `an` mit Komma
-  trennen. Wer nur Push möchte, lässt den Abschnitt weg.
+- **`[mail]`**: Eine E-Mail mit den drei günstigsten Märkten samt Preis,
+  Bestand und Link. Haben mehrere Märkte den gleichen Preis, werden es bis zu
+  fünf. Mehrere Empfänger in `an` mit Komma trennen. Wer nur Push möchte, lässt
+  den Abschnitt weg.
 - **`[push]`**: Push-Nachricht aufs Handy über [ntfy](https://ntfy.sh). Die
   kostenlose ntfy-App (Android/iOS) installieren und dort das gleiche `thema`
   abonnieren. Das Thema ist wie ein Passwort: Jeder, der es kennt, kann
   mitlesen, also einen eigenen, schwer erratbaren Namen wählen.
+
+Benachrichtigt wird nach der ersten Suche und danach nur, wenn sich die Liste
+ändert, also ein Preis darin oder ein Markt dazukommt oder wegfällt. Geänderte
+Stückzahlen allein lösen nichts aus. Im Betreff steht dann auch der vorherige
+Bestpreis.
 
 Bei den meisten Anbietern braucht es für `passwort` ein eigenes App-Passwort
 statt des normalen Passworts:
